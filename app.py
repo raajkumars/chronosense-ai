@@ -23,6 +23,10 @@ import db
 
 st.set_page_config(page_title="ChronoSense AI", page_icon="🧬", layout="wide")
 
+# --- Browser video recorder (injected via st.html) ---
+# Note: st.html() can break Streamlit's component tree in some versions.
+# The recorder is disabled by default; use Upload Video instead.
+
 st.title("🧬 ChronoSense AI — Longevity Biomarker Diagnostics Agent")
 st.caption("Voice & Gait Biomarker Analysis · Sundai Hack 143 · Biomarkers of Aging")
 
@@ -83,6 +87,15 @@ def process_gait(source: str, file_path: str | None = None):
     """Process gait data from the given source."""
     with st.spinner("Processing gait video..."):
         stats = extract_gait_features(file_path)
+
+    # Handle rejected videos
+    if stats.get("rejected"):
+        st.error(f"❌ Video rejected: {stats['rejection_reason']}")
+        st.info("📋 Check the instructions above and record a new video.")
+        st.session_state["gait_stats"] = None
+        st.session_state["gait_source"] = None
+        return
+
     st.session_state["gait_stats"] = stats
     st.session_state["gait_source"] = source
     clear_evaluation()
@@ -131,6 +144,18 @@ with st.sidebar:
             db.sign_out()
             st.session_state["user"] = None
             st.rerun()
+
+    st.divider()
+    st.header("👤 Your Info")
+    st.number_input(
+        "Chronological Age",
+        min_value=1,
+        max_value=120,
+        value=st.session_state.get("user_age", 40),
+        key="user_age_input",
+        help="Your actual age — used as the baseline for biological age calculation",
+    )
+    st.session_state["user_age"] = st.session_state.get("user_age_input", 40)
 
     st.divider()
     st.header("🔒 Privacy")
@@ -208,33 +233,63 @@ with tab_voice:
 with tab_gait:
     st.subheader("Gait Biomarker Analysis")
 
-    col_cap, col_up, col_test = st.columns(3)
-    with col_cap:
-        if st.button("📹 Capture", key="gait_capture", use_container_width=True):
-            st.session_state["gait_capture_active"] = True
+    # --- Instructions Panel ---
+    with st.expander("📋 How to Record a Gait Video (Read This First)", expanded=True):
+        st.markdown("""
+        ### What We Measure
+        The gait analyzer extracts **knee angles, hip angles, asymmetry, and step frequency** from your walking video.
+
+        ### Recording Instructions
+
+        **1. Setup**
+        - Place your phone/camera on a stable surface (tripod, stack of books, etc.)
+        - Position it at **hip height** (~3 feet / 1 meter high)
+        - Make sure the **entire body** is visible — head to feet
+
+        **2. Position**
+        - Stand **sideways** to the camera (profile/lateral view)
+        - You should be walking **left to right** or **right to left** across the frame
+        - ❌ Do NOT walk toward or away from the camera
+        - ❌ Do NOT stand still — we need walking motion
+
+        **3. Recording**
+        - Start recording
+        - Walk **naturally** across the frame for **3-5 seconds**
+        - Take at least **4-5 steps**
+        - Stop recording
+
+        **4. Upload**
+        - Click **📁 Upload** below and select your video
+        - Supported formats: MP4, AVI, MOV, WEBM
+
+        ### What Makes a Good Gait Video
+        | ✅ Good | ❌ Bad |
+        |---|---|
+| Side view (profile) | Front or back view |
+| Full body in frame | Partial body (cut off) |
+| Walking across frame | Standing still |
+| 3-5 seconds | Too short (<2s) or too long (>10s) |
+| Natural walking | Exaggerated movements |
+| Good lighting | Dark or backlit |
+        """)
+
+    col_up, col_test = st.columns(2)
     with col_up:
-        if st.button("📁 Upload", key="gait_upload", use_container_width=True):
+        if st.button("📁 Upload Video", key="gait_upload", use_container_width=True):
             st.session_state["gait_upload_active"] = True
     with col_test:
-        if st.button("🧪 Test Data", key="gait_test", use_container_width=True):
+        if st.button("🧪 Test Data (Demo)", key="gait_test", use_container_width=True):
             process_gait("test", None)
 
-    # Capture still (camera_input captures a photo, not video)
-    if st.session_state.get("gait_capture_active"):
-        st.info("📹 Take a walking snapshot below. For full gait tracking, upload a short video.")
-        video_value = st.camera_input("Capture walking snapshot")
-        if video_value is not None:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-                tmp.write(video_value.read())
-                gait_path = tmp.name
-            st.success("✅ Snapshot captured!")
-            st.image(gait_path)
-            process_gait("capture", gait_path)
-            st.session_state["gait_capture_active"] = False
+    # Browser recorder disabled — st.html() breaks Streamlit component tree
+    # Use Upload Video or Test Data instead
 
     # Upload video
     if st.session_state.get("gait_upload_active"):
-        uploaded = st.file_uploader("Upload a walking video", type=["mp4", "avi", "mov", "webm"])
+        uploaded = st.file_uploader(
+            "Upload a walking video (side view, full body, 3-5 seconds)",
+            type=["mp4", "avi", "mov", "webm"]
+        )
         if uploaded is not None:
             suffix = os.path.splitext(uploaded.name)[1] or ".mp4"
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -248,9 +303,24 @@ with tab_gait:
     if st.session_state["gait_stats"] is not None:
         src = st.session_state.get("gait_source", "unknown")
         _g = st.session_state["gait_stats"]
+
+        # Quality indicators
+        step_freq = _g.get("step_frequency", 0)
+        asym = _g.get("asymmetry_index", 0)
+        frames = _g.get("frames_processed", 0)
+
+        quality_good = step_freq > 0.3 and frames > 30
+        quality_warning = not quality_good and not _g.get("is_mock", False)
+
+        if quality_warning:
+            st.warning(
+                "⚠️ **Low gait signal detected.** The video may not contain enough walking motion. "
+                "Make sure you're walking (not standing) and your full body is visible in the frame."
+            )
+
         st.caption(
-            f"Source: {src} · Asymmetry: {_g.get('asymmetry_index', 0)}° · "
-            f"Step Freq: {_g.get('step_frequency', 0)} Hz"
+            f"Source: {src} · Asymmetry: {asym}° · "
+            f"Step Freq: {step_freq} Hz · Frames: {frames}"
         )
 
 # --- My Reports Tab ---
@@ -308,7 +378,7 @@ if voice_ready or gait_ready:
         gait_stats = st.session_state.get("gait_stats") or extract_gait_features(None)
 
         with st.spinner("Agent evaluating biomarkers..."):
-            evaluation = evaluate_biomarkers(voice_stats, gait_stats)
+            evaluation = evaluate_biomarkers(voice_stats, gait_stats, st.session_state.get("user_age"))
         st.session_state["evaluation"] = evaluation
 
         pdf_path = generate_pdf(voice_stats, gait_stats, evaluation)
@@ -327,10 +397,13 @@ if voice_ready or gait_ready:
     if st.session_state["evaluation"] is not None:
         evaluation = st.session_state["evaluation"]
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         col1.metric("Biological Age", f"{evaluation.get('biological_age_estimate', 'N/A')}")
-        col2.metric("Frailty Indicator", str(evaluation.get("frailty_indicator", "N/A")).title())
-        col3.metric("Anomalies", len(evaluation.get("anomalies", [])))
+        col2.metric("Chronological Age", f"{evaluation.get('chronological_age', 'N/A')}")
+        delta = evaluation.get("age_delta", 0)
+        delta_str = f"+{delta}" if delta > 0 else str(delta)
+        col3.metric("Age Delta", f"{delta_str} years")
+        col4.metric("Frailty Indicator", str(evaluation.get("frailty_indicator", "N/A")).title())
 
         st.write("**Detected Anomalies:**")
         for a in evaluation.get("anomalies", []):

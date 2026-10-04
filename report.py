@@ -27,6 +27,10 @@ def generate_pdf(voice: dict, gait: dict, evaluation: dict, output_path: str = "
 
     # Biological Age
     story.append(Paragraph(f"<b>Biological Age Estimate:</b> {evaluation.get('biological_age_estimate', 'N/A')}", styles['Normal']))
+    story.append(Paragraph(f"<b>Chronological Age:</b> {evaluation.get('chronological_age', 'N/A')}", styles['Normal']))
+    delta = evaluation.get("age_delta", 0)
+    delta_str = f"+{delta}" if delta > 0 else str(delta)
+    story.append(Paragraph(f"<b>Age Delta:</b> {delta_str} years", styles['Normal']))
     story.append(Paragraph(f"<b>Frailty Indicator:</b> {evaluation.get('frailty_indicator', 'N/A')}", styles['Normal']))
     story.append(Spacer(1, 12))
 
