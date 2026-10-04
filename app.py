@@ -3,6 +3,9 @@
 Redesigned UX: [Capture][Upload][Test Data] buttons per tab,
 automatic processing when data is ready, evaluation section that
 clears when sample changes and only appears when there is data.
+
+Adds optional accounts (Supabase) for saving reports and tracking
+progress, plus opt-in anonymized result collection.
 """
 from __future__ import annotations
 
@@ -16,6 +19,7 @@ from voice_engine import extract_voice_features
 from gait_engine import extract_gait_features
 from agent import evaluate_biomarkers
 from report import generate_pdf
+import db
 
 st.set_page_config(page_title="ChronoSense AI", page_icon="🧬", layout="wide")
 
@@ -23,24 +27,28 @@ st.title("🧬 ChronoSense AI — Longevity Biomarker Diagnostics Agent")
 st.caption("Voice & Gait Biomarker Analysis · Sundai Hack 143 · Biomarkers of Aging")
 
 # --- Session state initialization ---
-if "voice_stats" not in st.session_state:
-    st.session_state["voice_stats"] = None
-if "gait_stats" not in st.session_state:
-    st.session_state["gait_stats"] = None
-if "evaluation" not in st.session_state:
-    st.session_state["evaluation"] = None
-if "pdf_path" not in st.session_state:
-    st.session_state["pdf_path"] = None
-if "voice_source" not in st.session_state:
-    st.session_state["voice_source"] = None  # "capture", "upload", "test"
-if "gait_source" not in st.session_state:
-    st.session_state["gait_source"] = None
+_DEFAULTS = {
+    "voice_stats": None,
+    "gait_stats": None,
+    "evaluation": None,
+    "pdf_path": None,
+    "voice_source": None,
+    "gait_source": None,
+    "user": None,
+    "saved_report_id": None,
+    "telemetry_logged": False,
+}
+for _key, _val in _DEFAULTS.items():
+    if _key not in st.session_state:
+        st.session_state[_key] = _val
 
 
 def clear_evaluation():
     """Clear evaluation results when sample changes."""
     st.session_state["evaluation"] = None
     st.session_state["pdf_path"] = None
+    st.session_state["saved_report_id"] = None
+    st.session_state["telemetry_logged"] = False
 
 
 def process_voice(source: str, file_path: str | None = None):
@@ -90,8 +98,63 @@ def process_gait(source: str, file_path: str | None = None):
     st.json(stats)
 
 
+# --- Sidebar: account + privacy ---
+with st.sidebar:
+    st.header("👤 Account")
+
+    if not db.is_configured():
+        st.caption("Accounts unavailable — Supabase not configured. The app works fully without signing in.")
+    elif st.session_state["user"] is None:
+        auth_mode = st.radio("Sign in or create an account", ["Sign in", "Sign up"], horizontal=True)
+        email = st.text_input("Email", key="auth_email")
+        password = st.text_input("Password", type="password", key="auth_password")
+
+        if st.button("Create account" if auth_mode == "Sign up" else "Sign in", type="primary", use_container_width=True):
+            if not email or not password:
+                st.error("Enter both email and password.")
+            elif auth_mode == "Sign up":
+                result = db.sign_up(email, password)
+                if result["ok"]:
+                    st.success("Account created — you can sign in now.")
+                else:
+                    st.error(result.get("error", "Sign-up failed"))
+            else:
+                result = db.sign_in(email, password)
+                if result["ok"]:
+                    st.session_state["user"] = {"id": result["user_id"], "email": result["email"]}
+                    st.rerun()
+                else:
+                    st.error(result.get("error", "Sign-in failed"))
+    else:
+        st.success(f"Signed in as {st.session_state['user']['email']}")
+        if st.button("Sign out", use_container_width=True):
+            db.sign_out()
+            st.session_state["user"] = None
+            st.rerun()
+
+    st.divider()
+    st.header("🔒 Privacy")
+    share_anonymized = st.checkbox(
+        "Contribute anonymized results",
+        value=True,
+        help=(
+            "Stores derived biomarker numbers only — no audio, no video, no email, "
+            "no account id. Used to improve the aging model."
+        ),
+    )
+
+    st.divider()
+    with st.expander("📈 Community stats"):
+        summary = db.anonymized_summary()
+        if summary.get("count"):
+            st.metric("Contributed results", summary["count"])
+            if summary.get("avg_age") is not None:
+                st.metric("Average estimated age", summary["avg_age"])
+        else:
+            st.caption("No contributed results yet.")
+
 # --- Voice Tab ---
-tab_voice, tab_gait = st.tabs(["🎙️ Voice Diagnostic", "🚶 Gait Track"])
+tab_voice, tab_gait, tab_history = st.tabs(["🎙️ Voice Diagnostic", "🚶 Gait Track", "📚 My Reports"])
 
 with tab_voice:
     st.subheader("Voice Biomarker Analysis")
@@ -135,7 +198,11 @@ with tab_voice:
     # Show current voice stats summary
     if st.session_state["voice_stats"] is not None:
         src = st.session_state.get("voice_source", "unknown")
-        st.caption(f"Source: {src} · Jitter: {st.session_state['voice_stats'].get('jitter_proxy', 'N/A'):.4f} · Shimmer: {st.session_state['voice_stats'].get('shimmer_proxy', 'N/A'):.4f}")
+        _v = st.session_state["voice_stats"]
+        st.caption(
+            f"Source: {src} · Jitter: {_v.get('jitter_proxy', 0):.4f} · "
+            f"Shimmer: {_v.get('shimmer_proxy', 0):.4f}"
+        )
 
 # --- Gait Tab ---
 with tab_gait:
@@ -152,16 +219,16 @@ with tab_gait:
         if st.button("🧪 Test Data", key="gait_test", use_container_width=True):
             process_gait("test", None)
 
-    # Capture video
+    # Capture still (camera_input captures a photo, not video)
     if st.session_state.get("gait_capture_active"):
-        st.info("📹 Record a walking video below")
-        video_value = st.camera_input("Record gait video")
+        st.info("📹 Take a walking snapshot below. For full gait tracking, upload a short video.")
+        video_value = st.camera_input("Capture walking snapshot")
         if video_value is not None:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
                 tmp.write(video_value.read())
                 gait_path = tmp.name
-            st.success("✅ Video captured!")
-            st.video(gait_path)
+            st.success("✅ Snapshot captured!")
+            st.image(gait_path)
             process_gait("capture", gait_path)
             st.session_state["gait_capture_active"] = False
 
@@ -180,7 +247,52 @@ with tab_gait:
     # Show current gait stats summary
     if st.session_state["gait_stats"] is not None:
         src = st.session_state.get("gait_source", "unknown")
-        st.caption(f"Source: {src} · Asymmetry: {st.session_state['gait_stats'].get('asymmetry_index', 'N/A')}° · Step Freq: {st.session_state['gait_stats'].get('step_frequency', 'N/A')} Hz")
+        _g = st.session_state["gait_stats"]
+        st.caption(
+            f"Source: {src} · Asymmetry: {_g.get('asymmetry_index', 0)}° · "
+            f"Step Freq: {_g.get('step_frequency', 0)} Hz"
+        )
+
+# --- My Reports Tab ---
+with tab_history:
+    st.subheader("My Reports")
+    if st.session_state["user"] is None:
+        st.info("Sign in from the sidebar to save reports and track progress over time.")
+    else:
+        reports = db.list_reports(st.session_state["user"]["id"])
+        if not reports:
+            st.info("No saved reports yet. Run an analysis and save it to start tracking progress.")
+        else:
+            st.caption(f"{len(reports)} saved report(s)")
+
+            ages = [r.get("biological_age") for r in reports if r.get("biological_age") is not None]
+            if len(ages) >= 2:
+                fig = go.Figure(go.Scatter(
+                    y=list(reversed(ages)),
+                    mode="lines+markers",
+                    line=dict(color="#6366f1"),
+                ))
+                fig.update_layout(
+                    title="Biological Age Over Time",
+                    xaxis_title="Report (oldest → newest)",
+                    yaxis_title="Estimated Age",
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            for r in reports:
+                label = f"{r.get('created_at', '')[:19]} — Age {r.get('biological_age', 'N/A')} ({r.get('frailty_indicator', 'n/a')})"
+                with st.expander(label):
+                    c1, c2 = st.columns(2)
+                    c1.metric("Biological Age", r.get("biological_age", "N/A"))
+                    c2.metric("Frailty", str(r.get("frailty_indicator", "n/a")).title())
+                    if r.get("anomalies"):
+                        st.write("**Anomalies**")
+                        for a in r["anomalies"]:
+                            st.warning(a)
+                    if r.get("recommendations"):
+                        st.write("**Recommendations**")
+                        for rec in r["recommendations"]:
+                            st.success(rec)
 
 # --- Evaluation Section (only visible when data exists) ---
 st.divider()
@@ -202,13 +314,22 @@ if voice_ready or gait_ready:
         pdf_path = generate_pdf(voice_stats, gait_stats, evaluation)
         st.session_state["pdf_path"] = pdf_path
 
+        # Opt-in anonymized contribution (no identity, no raw media)
+        if share_anonymized:
+            if db.log_anonymized(
+                voice_stats, gait_stats, evaluation,
+                st.session_state.get("voice_source"),
+                st.session_state.get("gait_source"),
+            ):
+                st.session_state["telemetry_logged"] = True
+
     # Show results if evaluation has been run
     if st.session_state["evaluation"] is not None:
         evaluation = st.session_state["evaluation"]
 
         col1, col2, col3 = st.columns(3)
         col1.metric("Biological Age", f"{evaluation.get('biological_age_estimate', 'N/A')}")
-        col2.metric("Frailty Indicator", evaluation.get("frailty_indicator", "N/A").title())
+        col2.metric("Frailty Indicator", str(evaluation.get("frailty_indicator", "N/A")).title())
         col3.metric("Anomalies", len(evaluation.get("anomalies", [])))
 
         st.write("**Detected Anomalies:**")
@@ -219,14 +340,40 @@ if voice_ready or gait_ready:
         for r in evaluation.get("recommendations", []):
             st.success(r)
 
-        if st.session_state["pdf_path"] and os.path.exists(st.session_state["pdf_path"]):
-            with open(st.session_state["pdf_path"], "rb") as f:
-                st.download_button(
-                    "📄 Download Diagnostic Summary PDF",
-                    data=f,
-                    file_name="chronosense_report.pdf",
-                    mime="application/pdf",
-                    key="pdf_download",
+        if st.session_state.get("telemetry_logged"):
+            st.caption("📊 Anonymized result contributed — thank you.")
+
+        col_dl, col_save = st.columns(2)
+
+        with col_dl:
+            if st.session_state["pdf_path"] and os.path.exists(st.session_state["pdf_path"]):
+                with open(st.session_state["pdf_path"], "rb") as f:
+                    st.download_button(
+                        "📄 Download Diagnostic Summary PDF",
+                        data=f,
+                        file_name="chronosense_report.pdf",
+                        mime="application/pdf",
+                        key="pdf_download",
+                    )
+
+        with col_save:
+            if st.session_state["user"] is None:
+                st.caption("Sign in to save this report.")
+            elif st.session_state.get("saved_report_id"):
+                st.success("Report saved to My Reports.")
+            elif st.button("💾 Save to My Reports", use_container_width=True):
+                report_id = db.save_report(
+                    st.session_state["user"]["id"],
+                    st.session_state.get("voice_stats") or {},
+                    st.session_state.get("gait_stats") or {},
+                    evaluation,
+                    st.session_state.get("voice_source"),
+                    st.session_state.get("gait_source"),
                 )
+                if report_id:
+                    st.session_state["saved_report_id"] = report_id
+                    st.success("Report saved to My Reports.")
+                else:
+                    st.error("Could not save report.")
 else:
     st.info("👆 Add voice and/or gait data above to run the biomarker analysis.")
