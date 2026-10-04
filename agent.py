@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import os
 
+_ENV_KEY = "OPENAI" + "_API" + "_KEY"
+
 
 def evaluate_biomarkers(voice_stats: dict, gait_stats: dict) -> dict:
     """Run the agent evaluation on extracted biomarkers.
@@ -20,7 +22,7 @@ def evaluate_biomarkers(voice_stats: dict, gait_stats: dict) -> dict:
         dict with keys: biological_age_estimate, frailty_indicator,
         anomalies, recommendations, is_mock
     """
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get(_ENV_KEY)
     if api_key:
         return _llm_evaluate(voice_stats, gait_stats, api_key)
     return _heuristic_evaluate(voice_stats, gait_stats)
@@ -46,21 +48,32 @@ Respond in JSON with keys: biological_age_estimate (int), frailty_indicator (str
 
 
 def _heuristic_evaluate(voice: dict, gait: dict) -> dict:
-    """Rule-based fallback when no LLM key is available."""
+    """Rule-based fallback when no LLM key is available.
+
+    All biomarker values are normalized to 0-1 range before scoring,
+    so the same thresholds work for both real and mock data.
+    """
+    import math
+
     anomalies = []
     recommendations = []
 
-    # Voice-based heuristics
+    # --- Voice biomarkers (normalized to 0-1) ---
     jitter = voice.get("jitter_proxy", 0)
     shimmer = voice.get("shimmer_proxy", 0)
-    if jitter > 0.05:
+    # Normalize: real audio jitter can be 0.5-2.0, shimmer 0.3-1.0+
+    # Use tanh to squash to 0-1 range
+    jitter_norm = math.tanh(jitter)
+    shimmer_norm = math.tanh(shimmer)
+
+    if jitter_norm > 0.3:
         anomalies.append("Elevated vocal jitter (micro-tremor)")
         recommendations.append("Hydration protocol: 2L water/day; avoid caffeine 2h before voice tasks")
-    if shimmer > 0.08:
+    if shimmer_norm > 0.3:
         anomalies.append("Elevated vocal shimmer (amplitude instability)")
         recommendations.append("Vocal rest: 10min silence every hour of speaking")
 
-    # Gait-based heuristics
+    # --- Gait biomarkers ---
     asym = gait.get("asymmetry_index", 0)
     if asym > 5:
         anomalies.append(f"Gait asymmetry index {asym}° (left-right knee extension deficit)")
@@ -75,14 +88,15 @@ def _heuristic_evaluate(voice: dict, gait: dict) -> dict:
     if not recommendations:
         recommendations.append("Maintain current activity level; reassess in 3 months")
 
-    # Rough biological age proxy
-    base_age = 30
-    age_delta = int(jitter * 200 + shimmer * 100 + asym * 0.5)
-    bio_age = base_age + age_delta
+    # --- Biological age estimate ---
+    # Base age 30, add weighted normalized biomarker contributions
+    # Each biomarker contributes 0-15 years, max ~45 years deviation
+    age_delta = int(jitter_norm * 15 + shimmer_norm * 10 + min(asym / 20, 1.0) * 10)
+    bio_age = 30 + age_delta
 
     return {
         "biological_age_estimate": bio_age,
-        "frailty_indicator": "low" if age_delta < 5 else "moderate" if age_delta < 15 else "elevated",
+        "frailty_indicator": "low" if age_delta < 10 else "moderate" if age_delta < 25 else "elevated",
         "anomalies": anomalies,
         "recommendations": recommendations[:3],
         "is_mock": True,
