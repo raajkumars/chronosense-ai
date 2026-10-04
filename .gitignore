@@ -11,3 +11,4 @@ build/
 *.avi
 *.mov
 .DS_Store
+chronosense_report.pdf

@@ -67,7 +67,7 @@ def test_evaluate_frailty_indicator_valid():
         "frames_processed": 90,
     }
     result = evaluate_biomarkers(voice_stats, gait_stats)
-    assert result["frailty_indicator"] in ["low", "moderate", "high"]
+    assert result["frailty_indicator"] in ["low", "moderate", "elevated"]
 
 
 def test_evaluate_high_jitter_flags_anomaly():
