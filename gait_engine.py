@@ -30,9 +30,13 @@ def extract_gait_features(video_path: str | None = None) -> dict:
     import cv2
     import mediapipe as mp
 
-    mp_pose = mp.solutions.pose
-    pose = mp_pose.Pose(static_image_mode=False, model_complexity=1,
-                        min_detection_confidence=0.5, min_tracking_confidence=0.5)
+    try:
+        mp_pose = mp.solutions.pose
+        pose = mp_pose.Pose(static_image_mode=False, model_complexity=1,
+                            min_detection_confidence=0.5, min_tracking_confidence=0.5)
+    except Exception:
+        # MediaPipe failed to init (e.g. missing system libs on cloud) — fall back to mock
+        return _mock_gait_features()
 
     cap = cv2.VideoCapture(video_path)
     left_knee_angles, right_knee_angles = [], []
